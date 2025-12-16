@@ -23,6 +23,8 @@ import os
 import signal
 import sqlite3
 import subprocess
+
+import pytest
 import sys
 import threading
 import time
@@ -254,6 +256,13 @@ class ClaudeTelemetryTest:
             return False, "Command timed out"
         except Exception as e:
             return False, str(e)
+
+
+@pytest.fixture
+def harness():
+    """Provide a ClaudeTelemetryTest instance for standalone tests."""
+    test_instance = ClaudeTelemetryTest()
+    yield test_instance
 
 
 def test_redis_available(harness: ClaudeTelemetryTest):
