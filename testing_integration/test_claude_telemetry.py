@@ -34,7 +34,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from testing_integration.test_harness_utils import save_test_results
+from testing_integration.test_harness_utils import BaseTelemetryTest, save_test_results
 
 class TelemetryServerManager:
     """Manages telemetry server lifecycle for testing."""
@@ -125,27 +125,15 @@ class TelemetryServerManager:
                 pass
 
 
-class ClaudeTelemetryTest:
+class ClaudeTelemetryTest(BaseTelemetryTest):
     """Test harness for Claude Code telemetry integration tests."""
 
-    def __init__(self):
-        self.telemetry_db = Path.home() / ".blueplane" / "telemetry.db"
-        self.test_marker = f"TEST_{uuid.uuid4().hex[:8]}"
-        self.start_time = datetime.now(timezone.utc)
-        self.results = {"passed": [], "failed": [], "skipped": []}
-        self.server_manager = TelemetryServerManager()
+    TABLE = "claude_raw_traces"
 
-    def record(self, name: str, passed: bool, message: str = "", skip: bool = False):
-        """Record test result."""
-        if skip:
-            self.results["skipped"].append((name, message))
-            print(f"  SKIP {name}: {message}")
-        elif passed:
-            self.results["passed"].append((name, message))
-            print(f"  PASS {name}: {message}")
-        else:
-            self.results["failed"].append((name, message))
-            print(f"  FAIL {name}: {message}")
+    def __init__(self):
+        super().__init__()
+        self.test_marker = f"TEST_{uuid.uuid4().hex[:8]}"
+        self.server_manager = TelemetryServerManager()
 
     def check_prerequisites(self) -> bool:
         """Check if Claude Code CLI is available."""
@@ -164,26 +152,14 @@ class ClaudeTelemetryTest:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
-    def check_redis(self) -> bool:
-        """Check if Redis is running."""
-        try:
-            import redis
-            r = redis.Redis(host='localhost', port=6379)
-            r.ping()
-            return True
-        except Exception:
-            return False
-
     def get_redis_event_count_since(self) -> int:
         """Get count of events in Redis message queue since test started."""
         try:
             import redis
             r = redis.Redis(host='localhost', port=6379, decode_responses=True)
-            # Get all events from the stream
             events = r.xrange('telemetry:message_queue', '-', '+')
             count = 0
             for event_id, data in events:
-                # Check if event timestamp is after test start
                 ts = data.get('timestamp', '')
                 if ts >= self.start_time.isoformat():
                     count += 1
@@ -192,32 +168,12 @@ class ClaudeTelemetryTest:
             print(f"  Warning: Redis error - {e}")
             return 0
 
-    def get_event_count_since(self, table: str = "claude_raw_traces") -> int:
-        """Get count of events since test started."""
-        allowed_tables = {"claude_raw_traces", "cursor_raw_traces"}
-        if table not in allowed_tables:
-            raise ValueError(f"Invalid table name: {table}")
+    def get_event_count_since(self) -> int:
+        """Get count of Claude events since test started."""
+        return self.get_event_count(self.TABLE)
 
-        if not self.telemetry_db.exists():
-            return 0
-
-        try:
-            with sqlite3.connect(str(self.telemetry_db)) as conn:
-                cursor = conn.execute(f"""
-                    SELECT COUNT(*) FROM {table}
-                    WHERE timestamp >= ?
-                """, (self.start_time.isoformat(),))
-                return cursor.fetchone()[0]
-        except sqlite3.Error as e:
-            print(f"  Warning: DB error - {e}")
-            return 0
-
-    def get_recent_events(self, table: str = "claude_raw_traces", limit: int = 5) -> list:
-        """Get recent events from database."""
-        allowed_tables = {"claude_raw_traces", "cursor_raw_traces"}
-        if table not in allowed_tables:
-            raise ValueError(f"Invalid table name: {table}")
-
+    def get_recent_events_since_start(self, limit: int = 5) -> list:
+        """Get recent events from database filtered by test start time."""
         if not self.telemetry_db.exists():
             return []
 
@@ -225,7 +181,7 @@ class ClaudeTelemetryTest:
             with sqlite3.connect(str(self.telemetry_db)) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(f"""
-                    SELECT * FROM {table}
+                    SELECT * FROM {self.TABLE}
                     WHERE timestamp >= ?
                     ORDER BY timestamp DESC
                     LIMIT ?
@@ -390,7 +346,7 @@ def test_event_structure(harness: ClaudeTelemetryTest):
     """Test that captured events have proper structure."""
     print("\n[TEST] Event structure validation...")
 
-    events = harness.get_recent_events(limit=3)
+    events = harness.get_recent_events_since_start(limit=3)
     if not events:
         harness.record("event_structure", False, "No recent events to validate", skip=True)
         pytest.skip("No recent events to validate")
@@ -424,7 +380,7 @@ def test_conversation_tracking(harness: ClaudeTelemetryTest):
     time.sleep(3)
 
     # Check for conversation-related events
-    events = harness.get_recent_events(limit=10)
+    events = harness.get_recent_events_since_start(limit=10)
     conversation_events = [e for e in events if "conversation" in str(e.get("event_type", "")).lower()]
 
     if conversation_events:

@@ -17,40 +17,28 @@ Usage:
     python testing_integration/test_cursor_telemetry.py
 """
 
-import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add project root to path BEFORE local imports
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from testing_integration.test_harness_utils import save_test_results
+from testing_integration.test_harness_utils import BaseTelemetryTest, save_test_results
 
 
-class CursorTelemetryTest:
+class CursorTelemetryTest(BaseTelemetryTest):
     """Test harness for Cursor telemetry integration tests."""
 
+    TABLE = "cursor_raw_traces"
+
     def __init__(self):
-        self.telemetry_db = Path.home() / ".blueplane" / "telemetry.db"
+        super().__init__()
         self.cursor_db_locations = [
             Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb",
             Path.home() / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb",
         ]
-        self.results = {"passed": [], "failed": [], "skipped": []}
-
-    def record(self, name: str, passed: bool, message: str = "", skip: bool = False):
-        """Record test result."""
-        if skip:
-            self.results["skipped"].append((name, message))
-            print(f"  ⏭️  {name}: SKIPPED - {message}")
-        elif passed:
-            self.results["passed"].append((name, message))
-            print(f"  ✅ {name}: {message}")
-        else:
-            self.results["failed"].append((name, message))
-            print(f"  ❌ {name}: {message}")
 
     def find_cursor_db(self) -> Path | None:
         """Find Cursor's state database."""
@@ -61,42 +49,11 @@ class CursorTelemetryTest:
 
     def get_cursor_event_count(self, hours: int = 24) -> int:
         """Get count of Cursor events in the last N hours."""
-        if not self.telemetry_db.exists():
-            return 0
-
-        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-
-        try:
-            with sqlite3.connect(str(self.telemetry_db)) as conn:
-                cursor = conn.execute("""
-                    SELECT COUNT(*) FROM cursor_raw_traces
-                    WHERE timestamp >= ?
-                """, (since,))
-                count = cursor.fetchone()[0]
-                return count
-        except sqlite3.Error as e:
-            print(f"  Warning: DB error - {e}")
-            return 0
+        return self.get_event_count(self.TABLE, hours=hours)
 
     def get_recent_cursor_events(self, limit: int = 5) -> list:
         """Get recent Cursor events."""
-        if not self.telemetry_db.exists():
-            return []
-
-        try:
-            with sqlite3.connect(str(self.telemetry_db)) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
-                    SELECT event_id, event_type, timestamp, storage_level, workspace_hash
-                    FROM cursor_raw_traces
-                    ORDER BY timestamp DESC
-                    LIMIT ?
-                """, (limit,))
-                events = [dict(row) for row in cursor.fetchall()]
-                return events
-        except sqlite3.Error as e:
-            print(f"  Warning: DB error - {e}")
-            return []
+        return self.get_recent_events(self.TABLE, limit=limit)
 
 
 def test_cursor_installed(harness: CursorTelemetryTest):
@@ -125,22 +82,12 @@ def test_telemetry_db_has_cursor_table(harness: CursorTelemetryTest):
         harness.record("cursor_table", False, "Telemetry DB not found", skip=True)
         return False
 
-    try:
-        with sqlite3.connect(str(harness.telemetry_db)) as conn:
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name='cursor_raw_traces'
-            """)
-            exists = cursor.fetchone() is not None
-
-            if exists:
-                harness.record("cursor_table", True, "cursor_raw_traces table exists")
-            else:
-                harness.record("cursor_table", False, "cursor_raw_traces table not found")
-            return exists
-    except sqlite3.Error as e:
-        harness.record("cursor_table", False, f"DB error: {e}")
-        return False
+    exists = harness.check_table_exists(harness.TABLE)
+    if exists:
+        harness.record("cursor_table", True, "cursor_raw_traces table exists")
+    else:
+        harness.record("cursor_table", False, "cursor_raw_traces table not found")
+    return exists
 
 
 def test_cursor_events_captured(harness: CursorTelemetryTest):
@@ -213,18 +160,13 @@ def run_all_tests():
             print(f"  - {name}: {msg}")
 
     # Save results to file
-    save_results(harness)
-
-    return 1 if harness.results['failed'] else 0
-
-
-def save_results(harness: CursorTelemetryTest):
-    """Save test results to /tmp/bp-telemetry-core/bug_fix/."""
     save_test_results(
         harness.results,
         "cursor_telemetry_integration",
         "cursor_integration"
     )
+
+    return 1 if harness.results['failed'] else 0
 
 
 if __name__ == "__main__":
