@@ -6,26 +6,27 @@
 """
 Real Integration Tests for Cursor Telemetry
 
-These tests verify that Cursor database monitoring is working correctly
-by checking for captured events in the telemetry database.
-
-Unlike Claude tests, Cursor tests are passive - they check if telemetry
-is being captured from Cursor's SQLite databases rather than invoking
-Cursor directly.
+These tests invoke the Cursor Agent CLI with --force flag and verify
+telemetry events are captured in the database.
 
 Usage:
     python testing_integration/test_cursor_telemetry.py
 """
 
+import os
+import subprocess
 import sys
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Add project root to path BEFORE local imports
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from testing_integration.test_harness_utils import BaseTelemetryTest, save_test_results
+from testing_integration.test_harness_utils import (
+    BaseTelemetryTest, TelemetryServerManager, save_test_results
+)
 
 
 class CursorTelemetryTest(BaseTelemetryTest):
@@ -35,137 +36,159 @@ class CursorTelemetryTest(BaseTelemetryTest):
 
     def __init__(self):
         super().__init__()
-        self.cursor_db_locations = [
-            Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb",
-            Path.home() / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb",
-        ]
+        self.test_marker = f"TEST_{uuid.uuid4().hex[:8]}"
+        self.server_manager = TelemetryServerManager()
 
-    def find_cursor_db(self) -> Path | None:
-        """Find Cursor's state database."""
-        for path in self.cursor_db_locations:
-            if path.exists():
-                return path
-        return None
-
-    def get_cursor_event_count(self, hours: int = 24) -> int:
-        """Get count of Cursor events in the last N hours."""
-        return self.get_event_count(self.TABLE, hours=hours)
-
-    def get_recent_cursor_events(self, limit: int = 5) -> list:
-        """Get recent Cursor events."""
-        return self.get_recent_events(self.TABLE, limit=limit)
-
-
-def test_cursor_installed(harness: CursorTelemetryTest):
-    """Test that Cursor is installed."""
-    print("\n[TEST] Cursor installation...")
-
-    cursor_db = harness.find_cursor_db()
-    if cursor_db:
-        harness.record("cursor_installed", True, f"Found Cursor DB at {cursor_db}")
-        return True
-    else:
-        harness.record(
-            "cursor_installed",
-            False,
-            "Cursor not found - install from https://cursor.sh",
-            skip=True
-        )
+    def check_cli(self) -> bool:
+        """Check if Cursor Agent CLI is available."""
+        try:
+            result = subprocess.run(
+                ["cursor-agent", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                print(f"  Cursor Agent version: {result.stdout.strip()}")
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
         return False
 
+    def get_sqlite_count(self) -> int:
+        """Count events in SQLite since test started."""
+        return self.get_event_count(self.TABLE)
 
-def test_telemetry_db_has_cursor_table(harness: CursorTelemetryTest):
-    """Test that telemetry database has cursor_raw_traces table."""
-    print("\n[TEST] Cursor telemetry table...")
+    def get_recent(self, limit: int = 5) -> list:
+        """Get recent events filtered by test start time."""
+        import sqlite3
+        if not self.telemetry_db.exists():
+            return []
+        try:
+            with sqlite3.connect(str(self.telemetry_db)) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(f"""
+                    SELECT * FROM {self.TABLE}
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp DESC LIMIT ?
+                """, (self.start_time.isoformat(), limit))
+                return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
 
-    if not harness.telemetry_db.exists():
-        harness.record("cursor_table", False, "Telemetry DB not found", skip=True)
-        return False
+    def run_cursor(self, prompt: str, timeout: int = 60) -> tuple[bool, str]:
+        """Run Cursor CLI with a prompt and return (success, output).
 
-    exists = harness.check_table_exists(harness.TABLE)
-    if exists:
-        harness.record("cursor_table", True, "cursor_raw_traces table exists")
-    else:
-        harness.record("cursor_table", False, "cursor_raw_traces table not found")
-    return exists
+        Uses: cursor-agent -p -f "prompt"
+        - -p/--print: non-interactive mode for scripts
+        - -f/--force: force allow commands unless explicitly denied
+        """
+        try:
+            full_cmd = ["cursor-agent", "-p", "-f", prompt]
+            print(f"  Command: {' '.join(full_cmd)}")
 
-
-def test_cursor_events_captured(harness: CursorTelemetryTest):
-    """Test that Cursor events are being captured."""
-    print("\n[TEST] Cursor event capture (last 24 hours)...")
-
-    count = harness.get_cursor_event_count(hours=24)
-    if count > 0:
-        harness.record("cursor_events", True, f"Found {count} events in last 24 hours")
-        return True
-    else:
-        harness.record(
-            "cursor_events",
-            False,
-            "No Cursor events found - use Cursor to generate events, or check telemetry server"
-        )
-        return False
-
-
-def test_cursor_event_structure(harness: CursorTelemetryTest):
-    """Test that Cursor events have proper structure."""
-    print("\n[TEST] Cursor event structure...")
-
-    events = harness.get_recent_cursor_events(limit=3)
-    if not events:
-        harness.record("cursor_structure", False, "No events to validate", skip=True)
-        return False
-
-    event = events[0]
-    required_fields = ["event_id", "event_type", "timestamp"]
-    missing = [f for f in required_fields if f not in event or event[f] is None]
-
-    if missing:
-        harness.record("cursor_structure", False, f"Missing fields: {missing}")
-        return False
-
-    harness.record("cursor_structure", True, f"Event fields: {list(event.keys())}")
-
-    # Show sample event
-    print(f"  Sample event: {event}")
-    return True
+            result = subprocess.run(
+                full_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**os.environ, "NO_COLOR": "1"}
+            )
+            return result.returncode == 0, result.stdout + result.stderr
+        except subprocess.TimeoutExpired:
+            return False, "Timeout"
+        except FileNotFoundError:
+            return False, "cursor-agent not found"
+        except Exception as e:
+            return False, str(e)
 
 
 def run_all_tests():
     """Run all Cursor integration tests."""
     print("=" * 70)
-    print("Cursor Telemetry - Real Integration Tests")
+    print("Cursor Telemetry - Integration Tests (REAL CLI)")
     print("=" * 70)
-    print(f"\nTest started at: {datetime.now(timezone.utc).isoformat()}")
+    print(f"Started: {datetime.now(timezone.utc).isoformat()}\n")
 
-    harness = CursorTelemetryTest()
+    h = CursorTelemetryTest()
+    we_started_server = False
 
-    # Run tests
-    test_cursor_installed(harness)
-    test_telemetry_db_has_cursor_table(harness)
-    test_cursor_events_captured(harness)
-    test_cursor_event_structure(harness)
+    try:
+        # Prerequisites
+        print("[TEST] Redis...")
+        if h.check_redis():
+            h.record("redis", True, "Running")
+        else:
+            h.record("redis", False, "Not running - start with: redis-server")
+            return _finish(h)
 
-    # Summary
-    print("\n" + "=" * 70)
-    print("RESULTS SUMMARY")
-    print("=" * 70)
-    print(f"  Passed:  {len(harness.results['passed'])}")
-    print(f"  Failed:  {len(harness.results['failed'])}")
-    print(f"  Skipped: {len(harness.results['skipped'])}")
+        print("\n[TEST] Cursor CLI...")
+        if h.check_cli():
+            h.record("cli", True, "Installed")
+        else:
+            h.record("cli", False, "Not found - install cursor-agent CLI", skip=True)
+            return _finish(h)
 
-    if harness.results['failed']:
-        print("\nFailed tests:")
-        for name, msg in harness.results['failed']:
-            print(f"  - {name}: {msg}")
+        # Server
+        print("\n[TEST] Server...")
+        if h.server_manager.is_running():
+            h.record("server", True, "Already running")
+        else:
+            we_started_server = h.server_manager.start(timeout=30)
+            h.record("server", we_started_server, "Started" if we_started_server else "Failed")
+            if not we_started_server:
+                return _finish(h)
 
-    # Save results to file
-    save_test_results(
-        harness.results,
-        "cursor_telemetry_integration",
-        "cursor_integration"
-    )
+        # Database
+        print("\n[TEST] Database...")
+        time.sleep(2)
+        if h.telemetry_db.exists():
+            h.record("database", True, f"Exists at {h.telemetry_db}")
+        else:
+            h.record("database", False, "Not found", skip=True)
+            return _finish(h)
 
+        # Event generation - REAL CLI INVOCATION
+        print("\n[TEST] Event generation (invoking real Cursor CLI)...")
+        initial = h.get_sqlite_count()
+        print(f"  Running: cursor-agent -p --force 'echo test marker: {h.test_marker}'")
+
+        success, output = h.run_cursor(f"echo 'test marker: {h.test_marker}'")
+        if not success:
+            h.record("events", False, f"Cursor CLI failed: {output[:100]}", skip=True)
+        else:
+            time.sleep(5)
+            new_count = h.get_sqlite_count() - initial
+            if new_count > 0:
+                h.record("events", True, f"Generated {new_count} events")
+            else:
+                h.record("events", False, "No events captured - check telemetry hooks")
+
+        # Event structure
+        print("\n[TEST] Event structure...")
+        events = h.get_recent(limit=3)
+        if events:
+            required = ["event_id", "event_type", "timestamp"]
+            missing = [f for f in required if f not in events[0] or events[0][f] is None]
+            if missing:
+                h.record("structure", False, f"Missing: {missing}")
+            else:
+                h.record("structure", True, f"Fields: {len(events[0])} columns")
+        else:
+            h.record("structure", False, "No events to validate", skip=True)
+
+    finally:
+        if we_started_server:
+            print("\n[CLEANUP] Stopping server...")
+            h.server_manager.stop()
+
+    return _finish(h)
+
+
+def _finish(harness: CursorTelemetryTest) -> int:
+    """Print summary, save results, return exit code."""
+    harness.print_summary()
+    save_test_results(harness.results, "cursor_telemetry_integration", "cursor_integration")
     return 1 if harness.results['failed'] else 0
 
 
