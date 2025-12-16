@@ -476,6 +476,11 @@ class TestClaudeTelemetry:
     def setup_method(self):
         self.harness = ClaudeTelemetryTest()
 
+    def teardown_method(self):
+        """Clean up resources after each test."""
+        if hasattr(self.harness, 'server_manager'):
+            self.harness.server_manager.stop()
+
     def test_claude_cli_available(self):
         assert test_claude_cli_available(self.harness)
 
