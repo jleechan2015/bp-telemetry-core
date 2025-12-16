@@ -17,7 +17,6 @@ Usage:
     python testing_integration/test_cursor_telemetry.py
 """
 
-import json
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -68,14 +67,13 @@ class CursorTelemetryTest:
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
         try:
-            conn = sqlite3.connect(str(self.telemetry_db))
-            cursor = conn.execute("""
-                SELECT COUNT(*) FROM cursor_raw_traces
-                WHERE timestamp >= ?
-            """, (since,))
-            count = cursor.fetchone()[0]
-            conn.close()
-            return count
+            with sqlite3.connect(str(self.telemetry_db)) as conn:
+                cursor = conn.execute("""
+                    SELECT COUNT(*) FROM cursor_raw_traces
+                    WHERE timestamp >= ?
+                """, (since,))
+                count = cursor.fetchone()[0]
+                return count
         except sqlite3.Error as e:
             print(f"  Warning: DB error - {e}")
             return 0
@@ -86,17 +84,16 @@ class CursorTelemetryTest:
             return []
 
         try:
-            conn = sqlite3.connect(str(self.telemetry_db))
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
-                SELECT event_id, event_type, timestamp, storage_level, workspace_hash
-                FROM cursor_raw_traces
-                ORDER BY timestamp DESC
-                LIMIT ?
-            """, (limit,))
-            events = [dict(row) for row in cursor.fetchall()]
-            conn.close()
-            return events
+            with sqlite3.connect(str(self.telemetry_db)) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("""
+                    SELECT event_id, event_type, timestamp, storage_level, workspace_hash
+                    FROM cursor_raw_traces
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (limit,))
+                events = [dict(row) for row in cursor.fetchall()]
+                return events
         except sqlite3.Error as e:
             print(f"  Warning: DB error - {e}")
             return []
@@ -129,19 +126,18 @@ def test_telemetry_db_has_cursor_table(harness: CursorTelemetryTest):
         return False
 
     try:
-        conn = sqlite3.connect(str(harness.telemetry_db))
-        cursor = conn.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='table' AND name='cursor_raw_traces'
-        """)
-        exists = cursor.fetchone() is not None
-        conn.close()
+        with sqlite3.connect(str(harness.telemetry_db)) as conn:
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='cursor_raw_traces'
+            """)
+            exists = cursor.fetchone() is not None
 
-        if exists:
-            harness.record("cursor_table", True, "cursor_raw_traces table exists")
-        else:
-            harness.record("cursor_table", False, "cursor_raw_traces table not found")
-        return exists
+            if exists:
+                harness.record("cursor_table", True, "cursor_raw_traces table exists")
+            else:
+                harness.record("cursor_table", False, "cursor_raw_traces table not found")
+            return exists
     except sqlite3.Error as e:
         harness.record("cursor_table", False, f"DB error: {e}")
         return False

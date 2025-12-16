@@ -5,10 +5,11 @@
 """Shared helpers for integration test harnesses."""
 
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-RESULTS_DIR = Path("/tmp/bp-telemetry-core/bug_fix")
+RESULTS_DIR = Path(tempfile.gettempdir()) / "bp-telemetry-core" / "bug_fix"
 
 
 def save_test_results(results_dict: dict, test_suite_name: str, file_prefix: str) -> None:
