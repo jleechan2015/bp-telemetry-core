@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -20,12 +21,29 @@ PROJECT_ROOT = Path(__file__).parent.parent
 
 
 class BaseTelemetryTest:
-    """Base test harness with common functionality for telemetry tests."""
+    """Base test harness with common functionality for telemetry tests.
+
+    Subclasses only need to define class attributes:
+        CLI_COMMAND: list[str] - Command to run (e.g., ["claude"] or ["cursor-agent"])
+        CLI_ARGS: list[str] - Arguments for the CLI (e.g., ["-p", "--dangerously-skip-permissions"])
+        TABLE: str - SQLite table name (e.g., "claude_raw_traces")
+        SUITE_NAME: str - Test suite name for reporting
+        FILE_PREFIX: str - Prefix for result files
+    """
+
+    # Subclasses must override these
+    CLI_COMMAND: list[str] = []
+    CLI_ARGS: list[str] = []
+    TABLE: str = ""
+    SUITE_NAME: str = ""
+    FILE_PREFIX: str = ""
 
     def __init__(self):
         self.telemetry_db = Path.home() / ".blueplane" / "telemetry.db"
         self.start_time = datetime.now(timezone.utc)
         self.results = {"passed": [], "failed": [], "skipped": []}
+        self.test_marker = f"TEST_{uuid.uuid4().hex[:8]}"
+        self.server_manager = TelemetryServerManager()
 
     def record(self, name: str, passed: bool, message: str = "", skip: bool = False):
         """Record test result with consistent formatting."""
@@ -138,6 +156,164 @@ class BaseTelemetryTest:
             print("\nFailed tests:")
             for name, msg in self.results['failed']:
                 print(f"  - {name}: {msg}")
+
+    def check_cli(self) -> bool:
+        """Check if CLI is available using CLI_COMMAND."""
+        if not self.CLI_COMMAND:
+            raise ValueError("CLI_COMMAND must be defined in subclass")
+        try:
+            result = subprocess.run(
+                self.CLI_COMMAND + ["--version"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                cli_name = self.CLI_COMMAND[0]
+                print(f"  {cli_name} version: {result.stdout.strip()}")
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        return False
+
+    def run_cli(self, prompt: str, timeout: int = 60) -> tuple[bool, str]:
+        """Run CLI with a prompt and return (success, output).
+
+        Uses CLI_COMMAND + CLI_ARGS + prompt
+        """
+        if not self.CLI_COMMAND:
+            raise ValueError("CLI_COMMAND must be defined in subclass")
+        try:
+            full_cmd = self.CLI_COMMAND + self.CLI_ARGS + [prompt]
+            print(f"  Command: {' '.join(full_cmd)}")
+
+            result = subprocess.run(
+                full_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**os.environ, "NO_COLOR": "1"}
+            )
+            return result.returncode == 0, result.stdout + result.stderr
+        except subprocess.TimeoutExpired:
+            return False, "Timeout"
+        except FileNotFoundError:
+            return False, f"{self.CLI_COMMAND[0]} not found"
+        except Exception as e:
+            return False, str(e)
+
+    def get_sqlite_count(self) -> int:
+        """Count events in SQLite since test started."""
+        return self.get_event_count(self.TABLE)
+
+    def get_recent(self, limit: int = 5) -> list:
+        """Get recent events filtered by test start time."""
+        if not self.TABLE:
+            raise ValueError("TABLE must be defined in subclass")
+        if not self.telemetry_db.exists():
+            return []
+        try:
+            with sqlite3.connect(str(self.telemetry_db)) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(f"""
+                    SELECT * FROM {self.TABLE}
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp DESC LIMIT ?
+                """, (self.start_time.isoformat(), limit))
+                return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+
+    def run_all_tests(self) -> int:
+        """Run all integration tests for this CLI.
+
+        Returns exit code (0 = success, 1 = failure).
+        """
+        cli_name = self.CLI_COMMAND[0] if self.CLI_COMMAND else "Unknown"
+        print("=" * 70)
+        print(f"{cli_name.title()} Telemetry - Integration Tests (REAL CLI)")
+        print("=" * 70)
+        print(f"Started: {datetime.now(timezone.utc).isoformat()}\n")
+
+        we_started_server = False
+
+        try:
+            # Prerequisites
+            print("[TEST] Redis...")
+            if self.check_redis():
+                self.record("redis", True, "Running")
+            else:
+                self.record("redis", False, "Not running - start with: redis-server")
+                return self._finish()
+
+            print(f"\n[TEST] {cli_name.title()} CLI...")
+            if self.check_cli():
+                self.record("cli", True, "Installed")
+            else:
+                self.record("cli", False, f"Not found - install {cli_name}", skip=True)
+                return self._finish()
+
+            # Server
+            print("\n[TEST] Server...")
+            if self.server_manager.is_running():
+                self.record("server", True, "Already running")
+            else:
+                we_started_server = self.server_manager.start(timeout=30)
+                self.record("server", we_started_server,
+                           "Started" if we_started_server else "Failed")
+                if not we_started_server:
+                    return self._finish()
+
+            # Database
+            print("\n[TEST] Database...")
+            time.sleep(2)
+            if self.telemetry_db.exists():
+                self.record("database", True, f"Exists at {self.telemetry_db}")
+            else:
+                self.record("database", False, "Not found", skip=True)
+                return self._finish()
+
+            # Event generation - REAL CLI INVOCATION
+            print(f"\n[TEST] Event generation (invoking real {cli_name.title()} CLI)...")
+            initial = self.get_sqlite_count()
+            print(f"  Running: {' '.join(self.CLI_COMMAND + self.CLI_ARGS)} 'echo test marker: {self.test_marker}'")
+
+            success, output = self.run_cli(f"echo 'test marker: {self.test_marker}'")
+            if not success:
+                self.record("events", False, f"{cli_name.title()} CLI failed: {output[:100]}", skip=True)
+            else:
+                time.sleep(5)
+                new_count = self.get_sqlite_count() - initial
+                if new_count > 0:
+                    self.record("events", True, f"Generated {new_count} events")
+                else:
+                    self.record("events", False, "No events captured - check telemetry hooks")
+
+            # Event structure
+            print("\n[TEST] Event structure...")
+            events = self.get_recent(limit=3)
+            if events:
+                required = ["event_id", "event_type", "timestamp"]
+                missing = [f for f in required if f not in events[0] or events[0][f] is None]
+                if missing:
+                    self.record("structure", False, f"Missing: {missing}")
+                else:
+                    self.record("structure", True, f"Fields: {len(events[0])} columns")
+            else:
+                self.record("structure", False, "No events to validate", skip=True)
+
+        finally:
+            if we_started_server:
+                print("\n[CLEANUP] Stopping server...")
+                self.server_manager.stop()
+
+        return self._finish()
+
+    def _finish(self) -> int:
+        """Print summary, save results, return exit code."""
+        self.print_summary()
+        save_test_results(self.results, self.SUITE_NAME, self.FILE_PREFIX)
+        return 1 if self.results['failed'] else 0
 
 
 class TelemetryServerManager:
