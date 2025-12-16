@@ -18,13 +18,11 @@ Usage:
     pytest testing_integration/test_claude_telemetry.py -v -s
 """
 
-import json
 import os
 import signal
 import sqlite3
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -504,6 +502,11 @@ class TestClaudeTelemetry:
 
     def setup_method(self):
         self.harness = ClaudeTelemetryTest()
+
+    def teardown_method(self):
+        """Cleanup after each test - stop any running telemetry server."""
+        if hasattr(self.harness, 'server_manager') and self.harness.server_manager:
+            self.harness.server_manager.stop()
 
     def test_claude_cli_available(self):
         assert test_claude_cli_available(self.harness)
