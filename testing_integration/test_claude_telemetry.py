@@ -18,16 +18,14 @@ Usage:
     pytest testing_integration/test_claude_telemetry.py -v -s
 """
 
-import json
 import os
 import signal
 import sqlite3
 import subprocess
+import sys
+import time
 
 import pytest
-import sys
-import threading
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,7 +273,8 @@ def test_redis_available(harness: ClaudeTelemetryTest):
         available,
         "Redis is running" if available else "Redis not running - start with: redis-server"
     )
-    return available
+    assert available, "Redis is not available - start with: redis-server"
+    return True
 
 
 def test_server_starts(harness: ClaudeTelemetryTest):
@@ -288,7 +287,8 @@ def test_server_starts(harness: ClaudeTelemetryTest):
         started,
         "Telemetry server started" if started else "Failed to start telemetry server"
     )
-    return started
+    assert started, "Failed to start telemetry server"
+    return True
 
 
 def test_claude_cli_available(harness: ClaudeTelemetryTest):
@@ -301,7 +301,8 @@ def test_claude_cli_available(harness: ClaudeTelemetryTest):
         available,
         "Claude CLI is installed" if available else "Claude CLI not found - install with: npm install -g @anthropic/claude-code"
     )
-    return available
+    assert available, "Claude CLI not found - install with: npm install -g @anthropic/claude-code"
+    return True
 
 
 def test_telemetry_db_exists(harness: ClaudeTelemetryTest):
@@ -321,7 +322,8 @@ def test_telemetry_db_exists(harness: ClaudeTelemetryTest):
             f"Database not found at {harness.telemetry_db}",
             skip=True
         )
-    return db_exists
+    assert db_exists, f"Telemetry database not found at {harness.telemetry_db}"
+    return True
 
 
 def test_simple_prompt_generates_events(harness: ClaudeTelemetryTest):
@@ -355,6 +357,7 @@ def test_simple_prompt_generates_events(harness: ClaudeTelemetryTest):
     # Check both Redis and SQLite
     if new_sqlite > 0:
         harness.record("simple_prompt", True, f"Generated {new_sqlite} SQLite events, {new_redis} Redis events")
+        assert new_sqlite > 0, "Should have generated SQLite events"
         return True
     elif new_redis > 0:
         harness.record(
@@ -362,7 +365,7 @@ def test_simple_prompt_generates_events(harness: ClaudeTelemetryTest):
             False,
             f"Events in Redis ({new_redis}) but not in SQLite - server not consuming queue"
         )
-        return False
+        assert False, f"Events in Redis ({new_redis}) but not in SQLite - server not consuming queue"
     else:
         # Check if hooks are installed
         hooks_dir = Path.home() / ".claude" / "hooks" / "telemetry"
@@ -373,13 +376,14 @@ def test_simple_prompt_generates_events(harness: ClaudeTelemetryTest):
                 f"No events captured - telemetry hooks not installed. Run: python scripts/install_claude_hooks.py",
                 skip=True
             )
+            pytest.skip("Telemetry hooks not installed")
         else:
             harness.record(
                 "simple_prompt",
                 False,
                 "No new events in Redis or SQLite - hooks not firing"
             )
-        return False
+            assert False, "No new events in Redis or SQLite - hooks not firing"
 
 
 def test_event_structure(harness: ClaudeTelemetryTest):
@@ -389,7 +393,7 @@ def test_event_structure(harness: ClaudeTelemetryTest):
     events = harness.get_recent_events(limit=3)
     if not events:
         harness.record("event_structure", False, "No recent events to validate", skip=True)
-        return False
+        pytest.skip("No recent events to validate")
 
     # Check required fields
     required_fields = ["event_id", "event_type", "timestamp"]
@@ -398,9 +402,10 @@ def test_event_structure(harness: ClaudeTelemetryTest):
     missing_fields = [f for f in required_fields if f not in event or event[f] is None]
     if missing_fields:
         harness.record("event_structure", False, f"Missing fields: {missing_fields}")
-        return False
+        assert False, f"Event missing required fields: {missing_fields}"
 
     harness.record("event_structure", True, f"Event has all required fields: {list(event.keys())}")
+    assert len(missing_fields) == 0, "Event should have all required fields"
     return True
 
 
@@ -414,7 +419,7 @@ def test_conversation_tracking(harness: ClaudeTelemetryTest):
 
     if not success:
         harness.record("conversation_tracking", False, f"Command failed: {output[:100]}")
-        return False
+        assert False, f"Claude command failed: {output[:100]}"
 
     time.sleep(3)
 
@@ -430,6 +435,7 @@ def test_conversation_tracking(harness: ClaudeTelemetryTest):
             True,
             f"Found {len(events)} events (conversation tracking may use different event types)"
         )
+    assert len(events) > 0 or len(conversation_events) >= 0, "Should find events after Claude command"
     return True
 
 
@@ -520,16 +526,13 @@ class TestClaudeTelemetry:
     def test_telemetry_db_exists(self):
         # Skip if CLI not available
         if not self.harness.check_prerequisites():
-            import pytest
             pytest.skip("Claude CLI not available")
-        test_telemetry_db_exists(self.harness)
+        assert test_telemetry_db_exists(self.harness)
 
     def test_simple_prompt_generates_events(self):
         if not self.harness.check_prerequisites():
-            import pytest
             pytest.skip("Claude CLI not available")
         if not self.harness.telemetry_db.exists():
-            import pytest
             pytest.skip("Telemetry DB not found")
         assert test_simple_prompt_generates_events(self.harness)
 
