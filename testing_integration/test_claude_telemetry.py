@@ -174,6 +174,24 @@ class ClaudeTelemetryTest:
         except Exception:
             return False
 
+    def get_redis_event_count_since(self) -> int:
+        """Get count of events in Redis message queue since test started."""
+        try:
+            import redis
+            r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+            # Get all events from the stream
+            events = r.xrange('telemetry:message_queue', '-', '+')
+            count = 0
+            for event_id, data in events:
+                # Check if event timestamp is after test start
+                ts = data.get('timestamp', '')
+                if ts >= self.start_time.isoformat():
+                    count += 1
+            return count
+        except Exception as e:
+            print(f"  Warning: Redis error - {e}")
+            return 0
+
     def get_event_count_since(self, table: str = "claude_raw_traces") -> int:
         """Get count of events since test started."""
         allowed_tables = {"claude_raw_traces", "cursor_raw_traces"}
@@ -301,8 +319,9 @@ def test_simple_prompt_generates_events(harness: ClaudeTelemetryTest):
     """Test that a simple Claude prompt generates telemetry events."""
     print("\n[TEST] Simple prompt generates events...")
 
-    initial_count = harness.get_event_count_since()
-    print(f"  Initial event count: {initial_count}")
+    initial_sqlite_count = harness.get_event_count_since()
+    initial_redis_count = harness.get_redis_event_count_since()
+    print(f"  Initial counts - SQLite: {initial_sqlite_count}, Redis: {initial_redis_count}")
 
     # Run a simple Claude command
     prompt = f"echo 'test marker: {harness.test_marker}'"
@@ -317,14 +336,24 @@ def test_simple_prompt_generates_events(harness: ClaudeTelemetryTest):
     print("  Waiting for events to be captured...")
     time.sleep(5)
 
-    final_count = harness.get_event_count_since()
-    new_events = final_count - initial_count
+    final_sqlite_count = harness.get_event_count_since()
+    final_redis_count = harness.get_redis_event_count_since()
+    new_sqlite = final_sqlite_count - initial_sqlite_count
+    new_redis = final_redis_count - initial_redis_count
 
-    print(f"  Final event count: {final_count} (+{new_events} new)")
+    print(f"  Final counts - SQLite: {final_sqlite_count} (+{new_sqlite}), Redis: {final_redis_count} (+{new_redis})")
 
-    if new_events > 0:
-        harness.record("simple_prompt", True, f"Generated {new_events} new events")
+    # Check both Redis and SQLite
+    if new_sqlite > 0:
+        harness.record("simple_prompt", True, f"Generated {new_sqlite} SQLite events, {new_redis} Redis events")
         return True
+    elif new_redis > 0:
+        harness.record(
+            "simple_prompt",
+            False,
+            f"Events in Redis ({new_redis}) but not in SQLite - server not consuming queue"
+        )
+        return False
     else:
         # Check if hooks are installed
         hooks_dir = Path.home() / ".claude" / "hooks" / "telemetry"
@@ -339,7 +368,7 @@ def test_simple_prompt_generates_events(harness: ClaudeTelemetryTest):
             harness.record(
                 "simple_prompt",
                 False,
-                "No new events captured - hooks installed but not working"
+                "No new events in Redis or SQLite - hooks not firing"
             )
         return False
 
