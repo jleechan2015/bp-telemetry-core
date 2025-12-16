@@ -6,11 +6,12 @@
 
 import json
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-RESULTS_DIR = Path("/tmp/bp-telemetry-core/bug_fix")
+RESULTS_DIR = Path(tempfile.gettempdir()) / "bp-telemetry-core" / "bug_fix"
 
 
 class BaseTelemetryTest:
