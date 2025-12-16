@@ -5,12 +5,18 @@
 """Shared helpers and base classes for integration test harnesses."""
 
 import json
+import os
+import signal
 import sqlite3
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 RESULTS_DIR = Path("/tmp/bp-telemetry-core/bug_fix")
+PROJECT_ROOT = Path(__file__).parent.parent
 
 
 class BaseTelemetryTest:
@@ -118,6 +124,98 @@ class BaseTelemetryTest:
                 return cursor.fetchone() is not None
         except sqlite3.Error:
             return False
+
+    def print_summary(self) -> None:
+        """Print test results summary."""
+        print("\n" + "=" * 70)
+        print("RESULTS SUMMARY")
+        print("=" * 70)
+        print(f"  Passed:  {len(self.results['passed'])}")
+        print(f"  Failed:  {len(self.results['failed'])}")
+        print(f"  Skipped: {len(self.results['skipped'])}")
+
+        if self.results['failed']:
+            print("\nFailed tests:")
+            for name, msg in self.results['failed']:
+                print(f"  - {name}: {msg}")
+
+
+class TelemetryServerManager:
+    """Manages telemetry server lifecycle for testing."""
+
+    def __init__(self):
+        self.server_process = None
+        self.server_script = PROJECT_ROOT / "scripts" / "start_server.py"
+        self.pid_file = Path.home() / ".blueplane" / "server.pid"
+
+    def is_running(self) -> bool:
+        """Check if telemetry server is running."""
+        if self.pid_file.exists():
+            try:
+                pid = int(self.pid_file.read_text().strip())
+                os.kill(pid, 0)
+                return True
+            except (ValueError, OSError):
+                pass
+        return False
+
+    def start(self, timeout: int = 30) -> bool:
+        """Start telemetry server and wait for initialization."""
+        if self.is_running():
+            print("  Server already running")
+            return True
+
+        print(f"  Starting telemetry server...")
+        self.server_process = subprocess.Popen(
+            [sys.executable, str(self.server_script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(PROJECT_ROOT),
+        )
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.pid_file.exists():
+                print(f"  Server started (PID: {self.pid_file.read_text().strip()})")
+                time.sleep(2)
+                return True
+            time.sleep(0.5)
+
+        if self.server_process.poll() is not None:
+            stdout, stderr = self.server_process.communicate()
+            print(f"  Server failed: {stderr.decode()[:200]}")
+            return False
+
+        print(f"  Server start timed out")
+        return False
+
+    def stop(self) -> None:
+        """Stop telemetry server."""
+        if self.pid_file.exists():
+            try:
+                pid = int(self.pid_file.read_text().strip())
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(1)
+                try:
+                    os.kill(pid, 0)
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            except (ValueError, OSError):
+                pass
+
+        if self.server_process:
+            self.server_process.terminate()
+            try:
+                self.server_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.server_process.kill()
+
+        if self.pid_file.exists():
+            try:
+                self.pid_file.unlink()
+            except OSError:
+                pass
 
 
 def save_test_results(results_dict: dict, test_suite_name: str, file_prefix: str) -> None:
