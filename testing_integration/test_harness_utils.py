@@ -2,7 +2,15 @@
 # Copyright © 2025 Sierra Labs LLC
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Shared helpers and base classes for integration test harnesses."""
+"""Shared helpers and base classes for integration test harnesses.
+
+Supports two execution modes:
+1. Subprocess (default): Direct CLI invocation via subprocess.run()
+2. Orchestration Framework: Uses jleechanorg-orchestration for tmux-based agent spawning
+
+Install orchestration framework:
+    pip install jleechanorg-orchestration
+"""
 
 import json
 import os
@@ -15,6 +23,15 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+# Try to import orchestration framework (optional dependency)
+try:
+    from orchestration.task_dispatcher import CLI_PROFILES, TaskDispatcher
+    ORCHESTRATION_AVAILABLE = True
+except ImportError:
+    ORCHESTRATION_AVAILABLE = False
+    CLI_PROFILES = {}
+    TaskDispatcher = None
 
 RESULTS_DIR = Path("/tmp/bp-telemetry-core/bug_fix")
 PROJECT_ROOT = Path(__file__).parent.parent
