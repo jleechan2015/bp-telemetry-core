@@ -10,10 +10,12 @@ Install with: pip install jleechanorg-orchestration
 
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -31,17 +33,17 @@ PROJECT_ROOT = Path(__file__).parent.parent
 class BaseTelemetryTest:
     """Base test harness with common functionality for telemetry tests.
 
+    Uses jleechanorg-orchestration CLI_PROFILES for CLI configuration.
+
     Subclasses only need to define class attributes:
-        CLI_COMMAND: list[str] - Command to run (e.g., ["claude"] or ["cursor-agent"])
-        CLI_ARGS: list[str] - Arguments for the CLI (e.g., ["-p", "--dangerously-skip-permissions"])
+        CLI_NAME: str - Key in CLI_PROFILES (e.g., "claude" or "cursor")
         TABLE: str - SQLite table name (e.g., "claude_raw_traces")
         SUITE_NAME: str - Test suite name for reporting
         FILE_PREFIX: str - Prefix for result files
     """
 
     # Subclasses must override these
-    CLI_COMMAND: list[str] = []
-    CLI_ARGS: list[str] = []
+    CLI_NAME: str = ""  # Key in CLI_PROFILES (e.g., "claude", "cursor")
     TABLE: str = ""
     SUITE_NAME: str = ""
     FILE_PREFIX: str = ""
@@ -52,6 +54,12 @@ class BaseTelemetryTest:
         self.results = {"passed": [], "failed": [], "skipped": []}
         self.test_marker = f"TEST_{uuid.uuid4().hex[:8]}"
         self.server_manager = TelemetryServerManager()
+
+        # Get CLI profile from orchestration framework
+        if self.CLI_NAME and self.CLI_NAME in CLI_PROFILES:
+            self.cli_profile = CLI_PROFILES[self.CLI_NAME]
+        else:
+            self.cli_profile = None
 
     def record(self, name: str, passed: bool, message: str = "", skip: bool = False):
         """Record test result with consistent formatting."""
@@ -166,49 +174,89 @@ class BaseTelemetryTest:
                 print(f"  - {name}: {msg}")
 
     def check_cli(self) -> bool:
-        """Check if CLI is available using CLI_COMMAND."""
-        if not self.CLI_COMMAND:
-            raise ValueError("CLI_COMMAND must be defined in subclass")
+        """Check if CLI is available using orchestration CLI_PROFILES."""
+        if not self.cli_profile:
+            raise ValueError(f"CLI_NAME '{self.CLI_NAME}' not found in CLI_PROFILES")
+
+        cli_binary = self.cli_profile.get("binary")
+        cli_path = shutil.which(cli_binary)
+
+        if not cli_path:
+            return False
+
         try:
             result = subprocess.run(
-                self.CLI_COMMAND + ["--version"],
+                [cli_path, "--version"],
                 capture_output=True,
                 text=True,
                 timeout=10
             )
             if result.returncode == 0:
-                cli_name = self.CLI_COMMAND[0]
-                print(f"  {cli_name} version: {result.stdout.strip()}")
+                display_name = self.cli_profile.get("display_name", cli_binary)
+                print(f"  {display_name} version: {result.stdout.strip()}")
                 return True
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         return False
 
     def run_cli(self, prompt: str, timeout: int = 60) -> tuple[bool, str]:
-        """Run CLI with a prompt and return (success, output).
+        """Run CLI with a prompt using orchestration CLI_PROFILES command template.
 
-        Uses CLI_COMMAND + CLI_ARGS + prompt
+        Constructs command from CLI_PROFILES configuration.
         """
-        if not self.CLI_COMMAND:
-            raise ValueError("CLI_COMMAND must be defined in subclass")
+        if not self.cli_profile:
+            raise ValueError(f"CLI_NAME '{self.CLI_NAME}' not found in CLI_PROFILES")
+
+        cli_binary = self.cli_profile.get("binary")
+        cli_path = shutil.which(cli_binary)
+        if not cli_path:
+            return False, f"{cli_binary} not found"
+
+        # Write prompt to temp file (orchestration framework uses file-based prompts)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(prompt)
+            prompt_file = f.name
+
         try:
-            full_cmd = self.CLI_COMMAND + self.CLI_ARGS + [prompt]
-            print(f"  Command: {' '.join(full_cmd)}")
+            # Build command from CLI_PROFILES template
+            command_template = self.cli_profile.get("command_template", "{binary} -p {prompt_file}")
+            cli_command = command_template.format(
+                binary=cli_path,
+                prompt_file=prompt_file,
+                continue_flag=""
+            )
+            print(f"  Command: {cli_command}")
+
+            # Handle stdin redirection
+            stdin_template = self.cli_profile.get("stdin_template", "/dev/null")
+            stdin_file = None if stdin_template == "/dev/null" else open(prompt_file, 'r')
 
             result = subprocess.run(
-                full_cmd,
+                cli_command,
+                shell=True,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                stdin=stdin_file,
                 env={**os.environ, "NO_COLOR": "1"}
             )
+
+            if stdin_file:
+                stdin_file.close()
+
             return result.returncode == 0, result.stdout + result.stderr
         except subprocess.TimeoutExpired:
             return False, "Timeout"
         except FileNotFoundError:
-            return False, f"{self.CLI_COMMAND[0]} not found"
+            return False, f"{cli_binary} not found"
         except Exception as e:
             return False, str(e)
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(prompt_file)
+            except OSError:
+                pass
 
     def get_sqlite_count(self) -> int:
         """Count events in SQLite since test started."""
@@ -237,9 +285,9 @@ class BaseTelemetryTest:
 
         Returns exit code (0 = success, 1 = failure).
         """
-        cli_name = self.CLI_COMMAND[0] if self.CLI_COMMAND else "Unknown"
+        display_name = self.cli_profile.get("display_name", self.CLI_NAME) if self.cli_profile else "Unknown"
         print("=" * 70)
-        print(f"{cli_name.title()} Telemetry - Integration Tests (REAL CLI)")
+        print(f"{display_name} Telemetry - Integration Tests (REAL CLI)")
         print("=" * 70)
         print(f"Started: {datetime.now(timezone.utc).isoformat()}\n")
 
@@ -254,11 +302,12 @@ class BaseTelemetryTest:
                 self.record("redis", False, "Not running - start with: redis-server")
                 return self._finish()
 
-            print(f"\n[TEST] {cli_name.title()} CLI...")
+            print(f"\n[TEST] {display_name} CLI...")
             if self.check_cli():
                 self.record("cli", True, "Installed")
             else:
-                self.record("cli", False, f"Not found - install {cli_name}", skip=True)
+                cli_binary = self.cli_profile.get("binary", self.CLI_NAME) if self.cli_profile else self.CLI_NAME
+                self.record("cli", False, f"Not found - install {cli_binary}", skip=True)
                 return self._finish()
 
             # Server
@@ -282,13 +331,12 @@ class BaseTelemetryTest:
                 return self._finish()
 
             # Event generation - REAL CLI INVOCATION
-            print(f"\n[TEST] Event generation (invoking real {cli_name.title()} CLI)...")
+            print(f"\n[TEST] Event generation (invoking real {display_name} CLI)...")
             initial = self.get_sqlite_count()
-            print(f"  Running: {' '.join(self.CLI_COMMAND + self.CLI_ARGS)} 'echo test marker: {self.test_marker}'")
 
             success, output = self.run_cli(f"echo 'test marker: {self.test_marker}'")
             if not success:
-                self.record("events", False, f"{cli_name.title()} CLI failed: {output[:100]}", skip=True)
+                self.record("events", False, f"{display_name} CLI failed: {output[:100]}", skip=True)
             else:
                 time.sleep(5)
                 new_count = self.get_sqlite_count() - initial

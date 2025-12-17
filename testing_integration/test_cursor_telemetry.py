@@ -6,7 +6,7 @@
 """
 Real Integration Tests for Cursor Telemetry
 
-Invokes the Cursor Agent CLI with -p (print mode) and -f (force) flags
+Invokes the Cursor Agent CLI using the orchestration framework's CLI profile
 and verifies telemetry events are captured in the database.
 
 EXPECTED TO FAIL: cursor-agent CLI vs Cursor IDE Storage
@@ -43,8 +43,7 @@ from testing_integration.test_harness_utils import BaseTelemetryTest
 class CursorTelemetryTest(BaseTelemetryTest):
     """Test harness for Cursor telemetry integration tests."""
 
-    CLI_COMMAND = ["cursor-agent"]
-    CLI_ARGS = ["-p", "-f"]  # -p: print/non-interactive, -f: force allow commands
+    CLI_NAME = "cursor"  # Key in orchestration CLI_PROFILES
     TABLE = "cursor_raw_traces"
     SUITE_NAME = "cursor_telemetry_integration"
     FILE_PREFIX = "cursor_integration"

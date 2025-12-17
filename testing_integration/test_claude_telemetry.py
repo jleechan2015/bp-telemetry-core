@@ -6,8 +6,8 @@
 """
 Real Integration Tests for Claude Code Telemetry
 
-Invokes Claude Code with --dangerously-skip-permissions and verifies
-telemetry events are captured in the database.
+Invokes Claude Code using the orchestration framework's CLI profile
+and verifies telemetry events are captured in the database.
 
 Usage:
     python testing_integration/test_claude_telemetry.py
@@ -25,8 +25,7 @@ from testing_integration.test_harness_utils import BaseTelemetryTest
 class ClaudeTelemetryTest(BaseTelemetryTest):
     """Test harness for Claude Code telemetry integration tests."""
 
-    CLI_COMMAND = ["claude"]
-    CLI_ARGS = ["-p", "--dangerously-skip-permissions"]
+    CLI_NAME = "claude"  # Key in orchestration CLI_PROFILES
     TABLE = "claude_raw_traces"
     SUITE_NAME = "claude_telemetry_integration"
     FILE_PREFIX = "claude_integration"
