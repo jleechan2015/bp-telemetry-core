@@ -9,6 +9,24 @@ Real Integration Tests for Cursor Telemetry
 Invokes the Cursor Agent CLI with -p (print mode) and -f (force) flags
 and verifies telemetry events are captured in the database.
 
+EXPECTED TO FAIL: cursor-agent CLI vs Cursor IDE Storage
+=========================================================
+This test is expected to fail because cursor-agent CLI and Cursor IDE
+use different storage locations:
+
+- Cursor IDE writes to:
+    ~/Library/Application Support/Cursor/User/.../state.vscdb
+    (This is what our database monitor watches - WORKS)
+
+- cursor-agent CLI writes to:
+    ~/.cursor/chats/{hash}/{uuid}/store.db
+    (This is NOT monitored - test will fail)
+
+To make this test pass, we would need to add a monitor for:
+    ~/.cursor/chats/*/store.db
+
+The Cursor IDE telemetry capture works correctly. Only the CLI is not captured.
+
 Usage:
     python testing_integration/test_cursor_telemetry.py
 """
