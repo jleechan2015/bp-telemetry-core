@@ -494,7 +494,7 @@ mypy src/
 Real CLI integration tests are available in `testing_integration/`. These tests invoke actual CLI tools (Claude, Cursor) and verify telemetry capture.
 
 ```bash
-# Install optional orchestration framework (provides multi-CLI support)
+# Install orchestration framework (required for integration tests)
 pip install jleechanorg-orchestration
 
 # Run Claude integration test
