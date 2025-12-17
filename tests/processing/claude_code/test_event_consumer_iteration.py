@@ -11,8 +11,7 @@ The consumer loop referenced `iteration` variable without initializing it,
 causing a NameError when pending_count >= 200 and the code path tried to
 log every 10th iteration: `if iteration % 10 == 0`.
 
-This test verifies the iteration variable is properly initialized and
-incremented.
+This test verifies the bug is fixed through behavioral testing, not source inspection.
 """
 
 import pytest
@@ -26,72 +25,18 @@ sys.path.insert(0, str(project_root))
 
 
 class TestIterationVariableFix:
-    """Regression tests for iteration variable initialization."""
+    """Regression tests for iteration variable initialization.
 
-    def test_iteration_variable_initialized(self):
-        """Verify iteration is initialized before use in run() method."""
-        # Read the source file and verify iteration is initialized
-        consumer_file = project_root / "src" / "processing" / "claude_code" / "event_consumer.py"
-
-        with open(consumer_file, "r") as f:
-            source_code = f.read()
-
-        # Find the run method
-        assert "def run(self)" in source_code, "run() method should exist"
-
-        # Extract run method body
-        run_start = source_code.find("def run(self)")
-        # Find the while loop start
-        while_start = source_code.find("while self.running:", run_start)
-        assert while_start > run_start, "while loop should be in run()"
-
-        # Check that iteration = 0 appears before while loop
-        code_before_while = source_code[run_start:while_start]
-        assert "iteration = 0" in code_before_while, \
-            "iteration should be initialized to 0 before while loop"
-
-    def test_iteration_incremented_in_loop(self):
-        """Verify iteration is incremented at start of each loop."""
-        consumer_file = project_root / "src" / "processing" / "claude_code" / "event_consumer.py"
-
-        with open(consumer_file, "r") as f:
-            source_code = f.read()
-
-        # Find the while loop
-        while_start = source_code.find("while self.running:")
-        assert while_start > 0, "while loop should exist"
-
-        # Get some code after the while loop start
-        code_after_while = source_code[while_start:while_start + 500]
-
-        # iteration += 1 should appear early in the loop
-        assert "iteration += 1" in code_after_while, \
-            "iteration should be incremented at start of loop"
-
-    def test_iteration_used_safely(self):
-        """Verify iteration % 10 is only used after initialization."""
-        consumer_file = project_root / "src" / "processing" / "claude_code" / "event_consumer.py"
-
-        with open(consumer_file, "r") as f:
-            lines = f.readlines()
-
-        init_line = None
-        mod_line = None
-
-        for i, line in enumerate(lines):
-            if "iteration = 0" in line and init_line is None:
-                init_line = i
-            if "iteration % 10" in line and mod_line is None:
-                mod_line = i
-
-        assert init_line is not None, "iteration = 0 should exist"
-        assert mod_line is not None, "iteration % 10 should exist"
-        assert init_line < mod_line, \
-            f"iteration must be initialized (line {init_line}) before use (line {mod_line})"
+    These tests verify behavior, not source code structure.
+    """
 
     @patch('src.processing.claude_code.event_consumer.logger')
     def test_consumer_loop_no_nameerror(self, mock_logger):
-        """Integration test: consumer loop should not raise NameError."""
+        """Consumer loop should not raise NameError for iteration variable.
+
+        This is the critical regression test - before the fix, the consumer
+        would crash with NameError when pending_count >= 200.
+        """
         from src.processing.claude_code.event_consumer import ClaudeEventConsumer
 
         # Create mock dependencies
@@ -114,34 +59,119 @@ class TestIterationVariableFix:
             consumer_name="test_consumer",
         )
 
-        # Simulate high pending count to trigger the iteration % 10 path
-        # This would have caused NameError before the fix
-        consumer._get_pending_count = MagicMock(return_value=250)
-        consumer._process_pending_messages = MagicMock()
-        consumer._should_throttle_reads = MagicMock(return_value=False)
-        consumer._read_messages = MagicMock(return_value=[])
-
-        # Run a few iterations then stop
+        # Track iterations to stop after a few loops
         iteration_count = [0]
-        original_running = [True]
 
         def stop_after_iterations():
             iteration_count[0] += 1
             if iteration_count[0] >= 5:
                 consumer.running = False
-            return 250  # Keep returning high pending count
+            return 250  # High pending count to trigger iteration % 10 path
 
+        # Simulate high pending count to trigger the iteration % 10 path
+        # This would have caused NameError before the fix
         consumer._get_pending_count = stop_after_iterations
+        consumer._process_pending_messages = MagicMock()
+        consumer._should_throttle_reads = MagicMock(return_value=False)
+        consumer._read_messages = MagicMock(return_value=[])
 
-        # This should NOT raise NameError
+        # This should NOT raise NameError - the specific bug we're testing
         try:
             consumer.run()
         except NameError as e:
             pytest.fail(f"NameError raised - iteration variable not initialized: {e}")
-        except Exception as e:
-            # Other exceptions are OK for this test - we just care about NameError
-            if "iteration" in str(e).lower():
-                pytest.fail(f"Iteration-related error: {e}")
+        # Let other exceptions propagate - they indicate different bugs
+
+    @patch('src.processing.claude_code.event_consumer.logger')
+    def test_consumer_loop_runs_multiple_iterations(self, mock_logger):
+        """Consumer should successfully run multiple loop iterations."""
+        from src.processing.claude_code.event_consumer import ClaudeEventConsumer
+
+        mock_redis = MagicMock()
+        mock_redis.xinfo_groups.return_value = []
+        mock_redis.xgroup_create = MagicMock()
+        mock_redis.xpending.return_value = {'pending': 0}
+        mock_redis.xreadgroup.return_value = []
+
+        mock_writer = MagicMock()
+        mock_cdc = MagicMock()
+
+        consumer = ClaudeEventConsumer(
+            redis_client=mock_redis,
+            claude_writer=mock_writer,
+            cdc_publisher=mock_cdc,
+            stream_name="test:stream",
+            consumer_group="test_group",
+            consumer_name="test_consumer",
+        )
+
+        iteration_count = [0]
+
+        def count_and_stop():
+            iteration_count[0] += 1
+            if iteration_count[0] >= 15:  # Run 15 iterations
+                consumer.running = False
+            return 250
+
+        consumer._get_pending_count = count_and_stop
+        consumer._process_pending_messages = MagicMock()
+        consumer._should_throttle_reads = MagicMock(return_value=False)
+        consumer._read_messages = MagicMock(return_value=[])
+
+        try:
+            consumer.run()
+        except NameError as e:
+            pytest.fail(f"NameError raised during iteration: {e}")
+
+        # Verify we actually ran the expected number of iterations
+        assert iteration_count[0] >= 15, \
+            f"Expected at least 15 iterations, got {iteration_count[0]}"
+
+    @patch('src.processing.claude_code.event_consumer.logger')
+    def test_high_pending_count_triggers_processing(self, mock_logger):
+        """High pending count (>=200) should trigger pending message processing."""
+        from src.processing.claude_code.event_consumer import ClaudeEventConsumer
+
+        mock_redis = MagicMock()
+        mock_redis.xinfo_groups.return_value = []
+        mock_redis.xgroup_create = MagicMock()
+        mock_redis.xpending.return_value = {'pending': 0}
+        mock_redis.xreadgroup.return_value = []
+
+        mock_writer = MagicMock()
+        mock_cdc = MagicMock()
+
+        consumer = ClaudeEventConsumer(
+            redis_client=mock_redis,
+            claude_writer=mock_writer,
+            cdc_publisher=mock_cdc,
+            stream_name="test:stream",
+            consumer_group="test_group",
+            consumer_name="test_consumer",
+        )
+
+        iteration_count = [0]
+
+        def return_high_pending():
+            iteration_count[0] += 1
+            if iteration_count[0] >= 3:
+                consumer.running = False
+            return 250  # >= 200 threshold
+
+        consumer._get_pending_count = return_high_pending
+        process_pending_mock = MagicMock()
+        consumer._process_pending_messages = process_pending_mock
+        consumer._should_throttle_reads = MagicMock(return_value=False)
+        consumer._read_messages = MagicMock(return_value=[])
+
+        try:
+            consumer.run()
+        except NameError as e:
+            pytest.fail(f"NameError raised - iteration bug not fixed: {e}")
+
+        # Verify pending message processing was called (indicates high pending path works)
+        assert process_pending_mock.called, \
+            "High pending count should trigger _process_pending_messages"
 
 
 if __name__ == "__main__":
