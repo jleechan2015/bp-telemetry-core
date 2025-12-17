@@ -26,7 +26,21 @@ from typing import Optional
 # Install with: pip install jleechanorg-orchestration
 from orchestration.task_dispatcher import CLI_PROFILES, TaskDispatcher
 
-RESULTS_DIR = Path(tempfile.gettempdir()) / "bp-telemetry-core" / "bug_fix"
+def _get_branch_name() -> str:
+    """Get current git branch name for results directory."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().replace("/", "-")
+    except Exception:
+        pass
+    return "unknown-branch"
+
+RESULTS_DIR = Path(tempfile.gettempdir()) / "bp-telemetry-core" / _get_branch_name()
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
@@ -336,7 +350,9 @@ class BaseTelemetryTest:
 
             success, output = self.run_cli(f"echo 'test marker: {self.test_marker}'")
             if not success:
-                self.record("events", False, f"{display_name} CLI failed: {output[:100]}", skip=True)
+                # CLI failure is a real failure, not skip - prevents "passive" test passing
+                self.record("events", False, f"{display_name} CLI failed: {output[:100]}")
+                return self._finish()
             else:
                 time.sleep(5)
                 new_count = self.get_sqlite_count() - initial
@@ -388,7 +404,11 @@ class TelemetryServerManager:
                 os.kill(pid, 0)
                 return True
             except (ValueError, OSError):
-                pass
+                # Process is dead, clean up stale PID file
+                try:
+                    self.pid_file.unlink()
+                except OSError:
+                    pass
         return False
 
     def start(self, timeout: int = 30) -> bool:
@@ -398,10 +418,11 @@ class TelemetryServerManager:
             return True
 
         print(f"  Starting telemetry server...")
+        # Use DEVNULL to prevent pipe buffer deadlock when server logs heavily
         self.server_process = subprocess.Popen(
             [sys.executable, str(self.server_script)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             cwd=str(PROJECT_ROOT),
         )
 
@@ -414,11 +435,17 @@ class TelemetryServerManager:
             time.sleep(0.5)
 
         if self.server_process.poll() is not None:
-            stdout, stderr = self.server_process.communicate()
-            print(f"  Server failed: {stderr.decode()[:200]}")
+            print(f"  Server process exited with code: {self.server_process.returncode}")
             return False
 
+        # Timeout - terminate orphaned process before returning
         print(f"  Server start timed out")
+        if self.server_process:
+            self.server_process.terminate()
+            try:
+                self.server_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.server_process.kill()
         return False
 
     def stop(self) -> None:
@@ -467,15 +494,15 @@ def save_test_results(results_dict: dict, test_suite_name: str, file_prefix: str
         "skipped": [{"name": n, "message": m} for n, m in results_dict.get("skipped", [])],
     }
 
-    # Save JSON
+    # Save JSON (explicit UTF-8 for cross-platform compatibility)
     result_file = RESULTS_DIR / f"{file_prefix}_results.json"
-    with open(result_file, "w") as f:
-        json.dump(results, f, indent=2)
+    with open(result_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"\n📄 Results saved to: {result_file}")
 
-    # Save text summary
+    # Save text summary (explicit UTF-8 for emoji characters)
     summary_file = RESULTS_DIR / f"{file_prefix}_summary.txt"
-    with open(summary_file, "w") as f:
+    with open(summary_file, "w", encoding="utf-8") as f:
         f.write(f"{test_suite_name.replace('_', ' ').title()} - Integration Test Results\n")
         f.write("=" * 50 + "\n")
         f.write(f"Timestamp: {results['timestamp']}\n\n")
