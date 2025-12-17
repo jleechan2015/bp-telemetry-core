@@ -88,10 +88,14 @@ class BaseTelemetryTest:
             print(f"  ❌ {name}: {message}")
 
     def check_redis(self) -> bool:
-        """Check if Redis is running."""
+        """Check if Redis is running using project configuration."""
         try:
             import redis
-            r = redis.Redis(host='localhost', port=6379)
+            # Load Redis config from project configuration
+            from src.capture.shared.config import Config
+            config = Config()
+            redis_config = config.redis
+            r = redis.Redis(host=redis_config.host, port=redis_config.port)
             r.ping()
             return True
         except Exception:
@@ -232,14 +236,18 @@ class BaseTelemetryTest:
             prompt_file = f.name
 
         try:
-            # Build command from CLI_PROFILES template
+            # Build command as list to avoid shell injection (shell=False)
+            # Parse command_template to extract binary and args
             command_template = self.cli_profile.get("command_template", "{binary} -p {prompt_file}")
-            cli_command = command_template.format(
+            cli_command_str = command_template.format(
                 binary=cli_path,
                 prompt_file=prompt_file,
                 continue_flag=""
             )
-            print(f"  Command: {cli_command}")
+            # Split into list for safe subprocess execution
+            import shlex
+            cli_command = shlex.split(cli_command_str)
+            print(f"  Command: {' '.join(cli_command)}")
 
             # Handle stdin redirection
             stdin_template = self.cli_profile.get("stdin_template", "/dev/null")
@@ -247,7 +255,7 @@ class BaseTelemetryTest:
 
             result = subprocess.run(
                 cli_command,
-                shell=True,
+                shell=False,  # Use shell=False for security
                 capture_output=True,
                 text=True,
                 timeout=timeout,
