@@ -26,7 +26,7 @@ from typing import Optional
 # Install with: pip install jleechanorg-orchestration
 from orchestration.task_dispatcher import CLI_PROFILES, TaskDispatcher
 
-RESULTS_DIR = Path("/tmp/bp-telemetry-core/bug_fix")
+RESULTS_DIR = Path(tempfile.gettempdir()) / "bp-telemetry-core" / "bug_fix"
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
