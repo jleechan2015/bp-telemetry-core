@@ -249,30 +249,35 @@ class BaseTelemetryTest:
             cli_command = shlex.split(cli_command_str)
             print(f"  Command: {' '.join(cli_command)}")
 
-            # Handle stdin redirection
+            # Handle stdin redirection - use context manager to prevent leaks
             stdin_template = self.cli_profile.get("stdin_template", "/dev/null")
-            stdin_file = None if stdin_template == "/dev/null" else open(prompt_file, 'r')
+            stdin_file = None
 
-            result = subprocess.run(
-                cli_command,
-                shell=False,  # Use shell=False for security
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                stdin=stdin_file,
-                env={**os.environ, "NO_COLOR": "1"}
-            )
+            try:
+                if stdin_template != "/dev/null":
+                    stdin_file = open(prompt_file, 'r')
 
-            if stdin_file:
-                stdin_file.close()
+                result = subprocess.run(
+                    cli_command,
+                    shell=False,  # Use shell=False for security
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    stdin=stdin_file,
+                    env={**os.environ, "NO_COLOR": "1"}
+                )
 
-            return result.returncode == 0, result.stdout + result.stderr
-        except subprocess.TimeoutExpired:
-            return False, "Timeout"
-        except FileNotFoundError:
-            return False, f"{cli_binary} not found"
-        except Exception as e:
-            return False, str(e)
+                return result.returncode == 0, result.stdout + result.stderr
+            except subprocess.TimeoutExpired:
+                return False, "Timeout"
+            except FileNotFoundError:
+                return False, f"{cli_binary} not found"
+            except Exception as e:
+                return False, str(e)
+            finally:
+                # Always close stdin_file if opened (prevents resource leak)
+                if stdin_file:
+                    stdin_file.close()
         finally:
             # Clean up temp file
             try:
