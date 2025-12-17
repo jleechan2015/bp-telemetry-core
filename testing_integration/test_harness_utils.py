@@ -197,6 +197,9 @@ class BaseTelemetryTest:
             raise ValueError(f"CLI_NAME '{self.CLI_NAME}' not found in CLI_PROFILES")
 
         cli_binary = self.cli_profile.get("binary")
+        if not cli_binary:
+            raise ValueError(f"CLI profile '{self.CLI_NAME}' missing 'binary' field")
+        
         cli_path = shutil.which(cli_binary)
 
         if not cli_path:
@@ -226,6 +229,9 @@ class BaseTelemetryTest:
             raise ValueError(f"CLI_NAME '{self.CLI_NAME}' not found in CLI_PROFILES")
 
         cli_binary = self.cli_profile.get("binary")
+        if not cli_binary:
+            raise ValueError(f"CLI profile '{self.CLI_NAME}' missing 'binary' field")
+        
         cli_path = shutil.which(cli_binary)
         if not cli_path:
             return False, f"{cli_binary} not found"
@@ -239,13 +245,17 @@ class BaseTelemetryTest:
             # Build command as list to avoid shell injection (shell=False)
             # Parse command_template to extract binary and args
             command_template = self.cli_profile.get("command_template", "{binary} -p {prompt_file}")
+            
+            # Quote cli_path to handle spaces in paths
+            import shlex
+            cli_path_quoted = shlex.quote(cli_path)
+            
             cli_command_str = command_template.format(
-                binary=cli_path,
-                prompt_file=prompt_file,
+                binary=cli_path_quoted,
+                prompt_file=shlex.quote(prompt_file),
                 continue_flag=""
             )
             # Split into list for safe subprocess execution
-            import shlex
             cli_command = shlex.split(cli_command_str)
             print(f"  Command: {' '.join(cli_command)}")
 
