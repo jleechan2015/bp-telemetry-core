@@ -22,3 +22,5 @@ beads.left.jsonl
 beads.left.meta.json
 beads.right.jsonl
 beads.right.meta.json
+.br_history/
+dolt/
